@@ -27,6 +27,16 @@ dt{color:var(--muted)} dd{margin:0;font-variant-numeric:tabular-nums}
 .tag.warn{color:var(--warn);border-color:var(--warn)}
 .vol{display:inline-flex;align-items:center;gap:8px;font-size:.85rem;color:var(--muted)}
 .vol input{width:120px;accent-color:var(--accent)}
+.share{display:flex;flex-direction:column;gap:10px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px}
+.share h2{font:700 1.05rem var(--display);margin:0}
+.urlrow{display:flex;gap:8px}
+.urlrow input{flex:1;min-width:0;font:inherit;font-size:.85rem;padding:9px 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)}
+.btn{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:8px;padding:8px 14px;min-height:40px}
+.btn:hover{border-color:var(--accent)} .btn:disabled{opacity:.45;cursor:default}
+.seg button:disabled{opacity:.45;cursor:default}
+.incoming{display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:var(--accent);color:var(--accent-fg);border-radius:12px;padding:10px 14px;font-weight:600}
+.incoming .btn{color:var(--fg)}
+.rcount{font-size:.85rem;color:var(--muted);font-variant-numeric:tabular-nums}
 .controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
 .seg button{font:inherit;background:transparent;color:var(--fg);border:0;padding:8px 14px;cursor:pointer;min-height:40px}
@@ -55,6 +65,7 @@ body{margin:0;font-size:14px}[hidden]{display:none!important}
   <h1>ぽむ鍵盤</h1>
   <p class="sub">ぽむの鳴き声で弾く、ド〜高いドの13鍵。</p>
  </div>
+ <div class="incoming" id="incoming" hidden role="status">共有されたメロディ(<span id="incount"></span>音)があります。<button class="btn" id="inplay">再生する</button></div>
  <section class="stage" aria-live="polite">
   <div class="screen" id="screen"><canvas id="wave"></canvas><span id="screenLabel">鍵を押すと、鳴き声の波形が出ます。</span></div>
   <div class="info">
@@ -77,6 +88,19 @@ body{margin:0;font-size:14px}[hidden]{display:none!important}
  </div>
  <div class="kb" id="kb" role="group" aria-label="鍵盤"></div>
  <div class="legend"><span><span class="dot" style="display:inline-block"></span> 橙の点は、近い鳴き声が無く、音程を大きめに補正した鍵</span></div>
+ <section class="share" aria-label="メロディの共有">
+  <h2>メロディを共有</h2>
+  <div class="controls">
+   <div class="seg" role="group" aria-label="録音">
+    <button id="rec" aria-pressed="false">録音</button>
+    <button id="rplay" disabled>再生</button>
+    <button id="rclear" disabled>消す</button>
+   </div>
+   <span class="rcount" id="rcount">0音</span>
+  </div>
+  <div class="urlrow"><input id="rurl" readonly aria-label="共有URL" placeholder="録音を止めると、ここに共有URLが出ます"><button class="btn" id="rcopy" disabled>コピー</button></div>
+  <p class="note" id="rmsg" aria-live="polite">「録音」を押して鍵盤を弾き、もう一度押すと止まります。URLを受け取った人は、同じメロディを再生できます。</p>
+ </section>
  <p class="note">パソコンのキーボードでも弾けます。白鍵は A S D F G H J K、黒鍵は W E T Y U。音源は録音2本(3分35秒と3分55秒)から見つけた鳴き声で、13鍵それぞれに別の鳴き声を割り当てています。13鍵のうち9鍵は、元の声をほぼそのまま鳴らします。曲のボタンを押すと、今選んでいる音色で自動演奏します。</p>
 </main>
 <script>
@@ -84,6 +108,7 @@ const DATA={"keys": [{"i": 0, "name": "\u30c9", "t0": 60.94, "src": "2\u672c\u76
 const WHITE=[0,2,4,5,7,9,11,12], BLACK={1:0,3:1,6:3,8:4,10:5};
 const KEYMAP={a:0,w:1,s:2,e:3,d:4,f:5,t:6,g:7,y:8,h:9,u:10,j:11,k:12};
 const LET=Object.fromEntries(Object.entries(KEYMAP).map(([l,i])=>[i,l.toUpperCase()]));
+let recording=false,recEv=[],melody=null,ignoreHash=false;
 let ctx,bufs=[],norm=[],master,mode='bird';
 const volVal=()=>($('vol').value/100);
 const $=id=>document.getElementById(id);
@@ -116,8 +141,9 @@ function show(k){
   if(bufs[k.clip])drawWave(bufs[k.clip]);
 }
 const active={};
-async function down(i){
+async function down(i,auto){
   if(active[i])return;active[i]=1;
+  if(recording&&!auto)recNote(i);
   const el=document.querySelector(`[data-i="${i}"]`);el&&el.classList.add('down');
   const k=DATA.keys[i];show(k);
   try{await ensure()}catch(e){return}
@@ -168,9 +194,79 @@ async function playSong(n){
  try{await ensure()}catch(e){return}
  cur=n;songBox.children[n].setAttribute('aria-pressed','true');
  const s=SONGS[n];let t=0;
- s.seq.forEach(([i,b])=>{if(i>=0){timers.push(setTimeout(()=>down(i),t));timers.push(setTimeout(()=>up(i),t+s.beat*b*0.8))}t+=s.beat*b});
+ s.seq.forEach(([i,b])=>{if(i>=0){timers.push(setTimeout(()=>down(i,true),t));timers.push(setTimeout(()=>up(i),t+s.beat*b*0.8))}t+=s.beat*b});
  timers.push(setTimeout(stopTune,t+600));
 }
+
+/* ---- メロディの共有 ---- */
+const UNIT=50,GAPMAX=35,MAXN=300;
+const enc=m=>'m-'+m.v+m.ev.map(([i,g])=>String.fromCharCode(97+i)+g.toString(36)).join('');
+function dec(h){
+  if(!/^#m-[bp]([a-m][0-9a-z])+$/.test(h))return null;
+  const body=h.slice(4),ev=[];
+  for(let p=0;p<body.length;p+=2)ev.push([body.charCodeAt(p)-97,parseInt(body[p+1],36)]);
+  return ev.length<=MAXN?{v:h[3],ev}:null;
+}
+const msg=s=>{$('rmsg').textContent=s};
+function recNote(i){
+  const now=performance.now();
+  if(recEv.length){const p=recEv[recEv.length-1];p.gap=Math.min(GAPMAX,Math.max(0,Math.round((now-p.t)/UNIT)))}
+  if(recEv.length>=MAXN){stopRec();return}
+  recEv.push({i,t:now,gap:8});
+  $('rcount').textContent=recEv.length+'音';
+}
+function refreshShare(){
+  const n=melody?melody.ev.length:0;
+  $('rplay').disabled=!n;$('rclear').disabled=!n&&!recording;$('rcopy').disabled=!n;
+  $('rcount').textContent=(recording?recEv.length:n)+'音';
+}
+function startRec(){
+  stopTune();recording=true;recEv=[];melody=null;$('rurl').value='';
+  $('rec').setAttribute('aria-pressed','true');$('rec').textContent='停止';
+  msg('録音中です。鍵盤を弾いてください。');refreshShare();
+}
+function stopRec(){
+  recording=false;$('rec').setAttribute('aria-pressed','false');$('rec').textContent='録音';
+  if(!recEv.length){msg('音が入っていません。もう一度録音してください。');refreshShare();return}
+  melody={v:mode==='piano'?'p':'b',ev:recEv.map(e=>[e.i,e.gap])};
+  ignoreHash=true;location.hash=enc(melody);setTimeout(()=>{ignoreHash=false},80);
+  $('rurl').value=location.href;
+  msg('できました。URLをコピーして、送りたい人に渡してください。');refreshShare();
+}
+async function playMelody(m){
+  stopTune();
+  try{await ensure()}catch(e){return}
+  setMode(m.v==='p'?'piano':'bird');
+  let t=0;
+  m.ev.forEach(([i,g])=>{
+    timers.push(setTimeout(()=>down(i,true),t));
+    timers.push(setTimeout(()=>up(i),t+Math.min(600,Math.max(40,g*UNIT*0.8))));
+    t+=g*UNIT;
+  });
+  timers.push(setTimeout(stopTune,t+800));
+}
+function loadHash(){
+  const m=dec(location.hash);
+  if(!m){$('incoming').hidden=true;return}
+  melody=m;$('incoming').hidden=false;$('incount').textContent=m.ev.length;
+  $('rurl').value=location.href;refreshShare();
+}
+$('rec').onclick=()=>recording?stopRec():startRec();
+$('rplay').onclick=()=>melody&&playMelody(melody);
+$('inplay').onclick=()=>melody&&playMelody(melody);
+$('rclear').onclick=()=>{
+  if(recording){recording=false;$('rec').setAttribute('aria-pressed','false');$('rec').textContent='録音'}
+  recEv=[];melody=null;$('rurl').value='';$('incoming').hidden=true;
+  ignoreHash=true;history.replaceState(null,'',location.href.split('#')[0]);setTimeout(()=>{ignoreHash=false},80);
+  msg('消しました。');refreshShare();
+};
+$('rcopy').onclick=async()=>{
+  const u=$('rurl').value;if(!u)return;
+  try{await navigator.clipboard.writeText(u);msg('URLをコピーしました。')}
+  catch(e){$('rurl').focus();$('rurl').select();msg('URLを選択しました。コピーして使ってください。')}
+};
+addEventListener('hashchange',()=>{if(!ignoreHash)loadHash()});
+loadHash();
 </script>
 
 </body>
